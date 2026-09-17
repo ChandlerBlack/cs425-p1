@@ -7,6 +7,10 @@
 #include <netdb.h>
 #include "lab.h"
 
+#ifdef TEST
+#define main main_exclude
+#endif
+
 /*
  * Layer 3: Physical Socket Wrappers
 */

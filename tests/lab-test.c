@@ -195,6 +195,139 @@ void test_run_smtp_session_fails_and_cleans_up_on_data_rejection(void) {
     TEST_ASSERT_EQUAL(2, exit_code);
 }
 
+void test_run_smtp_session_fails_helo(void) {
+    test_ctx.server_input = "220 smtp.example.com\r\n500 Bad\r\n";
+    test_ctx.input_len = strlen(test_ctx.server_input);
+    TEST_ASSERT_EQUAL(2, run_smtp_session(&session, "lh", "f", "t", "s", "b"));
+}
+
+void test_run_smtp_session_fails_mail_from(void) {
+    test_ctx.server_input = "220 Ok\r\n250 Ok\r\n500 Bad\r\n";
+    test_ctx.input_len = strlen(test_ctx.server_input);
+    TEST_ASSERT_EQUAL(2, run_smtp_session(&session, "lh", "f", "t", "s", "b"));
+}
+
+void test_run_smtp_session_fails_rcpt_to(void) {
+    test_ctx.server_input = "220 Ok\r\n250 Ok\r\n250 Ok\r\n500 Bad\r\n";
+    test_ctx.input_len = strlen(test_ctx.server_input);
+    TEST_ASSERT_EQUAL(2, run_smtp_session(&session, "lh", "f", "t", "s", "b"));
+}
+
+void test_run_smtp_session_fails_message_payload(void) {
+    test_ctx.server_input = "220 Ok\r\n250 Ok\r\n250 Ok\r\n250 Ok\r\n354 Go\r\n500 Bad\r\n";
+    test_ctx.input_len = strlen(test_ctx.server_input);
+    TEST_ASSERT_EQUAL(2, run_smtp_session(&session, "lh", "f", "t", "s", "b"));
+}
+
+void test_run_smtp_session_fails_quit(void) {
+    test_ctx.server_input = "220 Ok\r\n250 Ok\r\n250 Ok\r\n250 Ok\r\n354 Go\r\n250 Ok\r\n500 Bad\r\n";
+    test_ctx.input_len = strlen(test_ctx.server_input);
+    TEST_ASSERT_EQUAL(2, run_smtp_session(&session, "lh", "f", "t", "s", "b"));
+}
+
+void test_network_disconnect_mid_read(void) {
+    // String lacks \r\n, so the mock reader will hit EOF while searching for the end of the line
+    test_ctx.server_input = "220 Hello"; 
+    test_ctx.input_len = strlen(test_ctx.server_input);
+    TEST_ASSERT_EQUAL(2, run_smtp_session(&session, "lh", "f", "t", "s", "b"));
+}
+
+void test_network_disconnect_mid_write(void) {
+    test_ctx.server_input = "220 Ok\r\n";
+    test_ctx.input_len = strlen(test_ctx.server_input);
+    
+    // Artificially fill the mock output buffer to force a send() failure
+    test_ctx.output_len = sizeof(test_ctx.client_output) - 2;
+    TEST_ASSERT_EQUAL(2, run_smtp_session(&session, "lh", "f", "t", "s", "b"));
+}
+
+void test_read_reply_line_buffer_exhaustion(void) {
+    // Fill a buffer larger than the session's internal read_buffer without a \r\n
+    char huge_input[2048];
+    memset(huge_input, 'A', sizeof(huge_input));
+    huge_input[2047] = '\0';
+    
+    test_ctx.server_input = huge_input;
+    test_ctx.input_len = 2048; 
+    
+    char line[100];
+    // This will loop until session->buffer_len maxes out, returning -1 on Line 98
+    int res = read_reply_line(&session, line, sizeof(line));
+    TEST_ASSERT_EQUAL(-1, res);
+}
+
+void test_run_smtp_session_fails_data_payload_write(void) {
+    test_ctx.server_input = "220 Ok\r\n250 Ok\r\n250 Ok\r\n250 Ok\r\n354 Go\r\n";
+    test_ctx.input_len = strlen(test_ctx.server_input);
+    
+    // send_command uses an internal 2048-byte buffer. Passing a subject larger than this 
+    // causes vsnprintf to overflow, making send_command fail instantly inside the DATA block.
+    char huge_subject[2500];
+    memset(huge_subject, 'X', sizeof(huge_subject) - 1);
+    huge_subject[2499] = '\0';
+    
+    int exit_code = run_smtp_session(&session, "lh", "f", "t", huge_subject, "body");
+    TEST_ASSERT_EQUAL(2, exit_code); // Reaches the free(safe_body) path
+}
+
+// A temporary mock that ONLY fails when writing the isolated "\r\n"
+ssize_t mock_write_fail_terminal_newline(void *ctx, const char *buf, size_t len) {
+    if (len == 2 && buf[0] == '\r' && buf[1] == '\n') {
+        return -1; 
+    }
+    return mock_write(ctx, buf, len); // Otherwise route to the normal mock
+}
+
+void test_run_smtp_session_fails_terminal_newline_injection(void) {
+    test_ctx.server_input = "220 Ok\r\n250 Ok\r\n250 Ok\r\n250 Ok\r\n354 Go\r\n";
+    test_ctx.input_len = strlen(test_ctx.server_input);
+    
+    // Swap the write function to our saboteur
+    session.write_fn = mock_write_fail_terminal_newline;
+    
+    // Provide a body that lacks a newline so the client attempts to append one
+    int exit_code = run_smtp_session(&session, "lh", "f", "t", "s", "body");
+    TEST_ASSERT_EQUAL(2, exit_code); // Reaches the final free(safe_body) path
+}
+
+void test_read_reply_line_exceeds_max_len(void) {
+    // String has a CRLF, but it occurs after the 100-byte limit of our output buffer
+    char long_input[150];
+    memset(long_input, 'A', sizeof(long_input));
+    long_input[110] = '\r';
+    long_input[111] = '\n';
+    long_input[112] = '\0';
+    
+    test_ctx.server_input = long_input;
+    test_ctx.input_len = strlen(test_ctx.server_input);
+    
+    char line[100];
+    int res = read_reply_line(&session, line, sizeof(line));
+    
+    TEST_ASSERT_EQUAL(-1, res);
+}
+
+// A temporary mock that ONLY fails when writing the final ".\r\n"
+ssize_t mock_write_fail_dot_crlf(void *ctx, const char *buf, size_t len) {
+    if (len == 3 && buf[0] == '.' && buf[1] == '\r' && buf[2] == '\n') {
+        return -1; 
+    }
+    return mock_write(ctx, buf, len);
+}
+
+void test_run_smtp_session_fails_dot_crlf(void) {
+    test_ctx.server_input = "220 Ok\r\n250 Ok\r\n250 Ok\r\n250 Ok\r\n354 Go\r\n";
+    test_ctx.input_len = strlen(test_ctx.server_input);
+    
+    // Swap the write function to our new saboteur
+    session.write_fn = mock_write_fail_dot_crlf;
+    
+    // Provide a body that ends in \n so the client skips the bare \r\n check and goes straight to .\r\n
+    int exit_code = run_smtp_session(&session, "lh", "f", "t", "s", "body\n");
+    TEST_ASSERT_EQUAL(2, exit_code); 
+}
+
+
 /*
   Main Test Runner
  */
@@ -202,7 +335,6 @@ void test_run_smtp_session_fails_and_cleans_up_on_data_rejection(void) {
 int main(void) {
     UNITY_BEGIN();
     
-    // Layer 1
     RUN_TEST(test_has_crlf_injection);
     RUN_TEST(test_parse_status_code);
     RUN_TEST(test_is_final_reply_line);
@@ -210,14 +342,29 @@ int main(void) {
     RUN_TEST(test_format_smtp_body_dot_stuffing);
     RUN_TEST(test_format_smtp_body_bare_lf);
     
-    // Layer 2
+
     RUN_TEST(test_read_reply_line);
     RUN_TEST(test_read_smtp_reply_multiline);
     
-    // State Machine
+
     RUN_TEST(test_run_smtp_session_happy_path);
     RUN_TEST(test_run_smtp_session_fails_on_bad_greeting);
     RUN_TEST(test_run_smtp_session_fails_and_cleans_up_on_data_rejection);
+    RUN_TEST(test_run_smtp_session_fails_helo);
+    RUN_TEST(test_run_smtp_session_fails_mail_from);
+    RUN_TEST(test_run_smtp_session_fails_rcpt_to);
+    RUN_TEST(test_run_smtp_session_fails_message_payload);
+    RUN_TEST(test_run_smtp_session_fails_quit);
+    RUN_TEST(test_network_disconnect_mid_read);
+    RUN_TEST(test_network_disconnect_mid_write);
+
+    RUN_TEST(test_read_reply_line_buffer_exhaustion);
+    RUN_TEST(test_run_smtp_session_fails_data_payload_write);
+    RUN_TEST(test_run_smtp_session_fails_terminal_newline_injection);
+
+    RUN_TEST(test_read_reply_line_exceeds_max_len);
+    RUN_TEST(test_run_smtp_session_fails_dot_crlf);
+    
     
     return UNITY_END();
 }

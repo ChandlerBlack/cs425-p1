@@ -141,7 +141,7 @@ report:
 	mkdir -p ./build/report/html
 	mkdir -p ./build/report/txt
 	gcovr -r . --html --html-details --exclude-directories build/tests/harness --exclude '.*main\.c$$' --exclude '.*test\.c$$' -o ./build/report/html/coverage_report.html
-	gcovr -r . --txt                 --exclude-directories build/tests/harness --exclude '.*main\.c$$' --exclude '.*test\.c$$'
+	gcovr -r . --txt                 --exclude-directories build/tests/harness --exclude '.*main\.c$$' --exclude '.*test\.c$$' -o ./build/report/txt/coverage_report.txt
 
 
 help:
