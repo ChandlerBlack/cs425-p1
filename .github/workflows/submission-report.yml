@@ -1,4 +1,4 @@
-name: Create Submission Report Via GitHub Action
+name: Create Submission Report Via GitHub Actions
 
 on:
     workflow_dispatch:
